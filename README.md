@@ -106,6 +106,102 @@ On first run, schema and demo data are loaded automatically.
 - Audit log records logins and insert/update/delete events only (no
   field-level diffs).
 
+## Project Phases and Roadmap
+
+Total effort is measured in calendar weeks for a 4-member team working on
+the course timeline. Effort estimates are indicative.
+
+### Completed phases
+
+#### Phase 0 - Requirements & Planning (1 week) - DONE
+
+- SRS v1.0 authored and approved.
+- Tech-stack decisions (Java 17 + Swing + MySQL + plain JDBC + Maven).
+- Schema design (10 tables, SRS Section 3.4).
+- MVP scope frozen: all 12 features at a demo-worthy level.
+
+#### Phase 1 - MVP Implementation (2 weeks) - DONE
+
+Current state of the codebase. Deliverables:
+
+- Maven project with fat-jar packaging via `maven-shade-plugin`.
+- MySQL schema + seed data auto-loaded on first launch.
+- Login with BCrypt-hashed credentials and four seeded roles.
+- All twelve SRS features (F-01 to F-12) implemented as independent
+  Swing panels behind a single `JTabbedPane`.
+- GPA / CGPA computation, prerequisite checking, running cash balance,
+  printable HTML grade sheet, searchable inventory, finance date-range
+  summary, audit trail.
+- FlatLaf look-and-feel, role-gated UI, manual DB backup via
+  `mysqldump`, README with demo script.
+
+### Upcoming phases
+
+#### Phase 2 - Hardening & UX Polish (1.5 weeks)
+
+Goal: raise the MVP to "production-ish" quality for the final viva.
+
+- **Date pickers** (JCalendar or equivalent) instead of free-text
+  `YYYY-MM-DD` fields - 1 day.
+- **Stricter input validation** across all forms with inline error
+  hints rather than modal dialogs - 2 days.
+- **Connection pooling** with HikariCP, replacing the singleton
+  `Connection` in `Database.java` - 1 day.
+- **Transactional grade entry**: wrap the multi-row "Save Grades"
+  operation in a single JDBC transaction so partial failures roll back
+  - 1 day.
+- **Unit tests** for `GpaService`, `RegistrationService`, and
+  `CashBookService` using JUnit 5 - 2 days.
+- **Keyboard shortcuts** on main actions (Ctrl-S save, Ctrl-F search,
+  Esc to clear form) - 0.5 day.
+- **App icon & splash screen** - 0.5 day.
+
+#### Phase 3 - SRS Compliance Uplift (2 weeks)
+
+Close the remaining gaps between the MVP shortcuts and the letter of
+the SRS.
+
+- **Automated 24h backup scheduler** using
+  `ScheduledExecutorService` instead of the manual menu item - 1 day.
+- **Proper Maintenance Mode** toggled at runtime by Admin (with a
+  system-wide banner) rather than a config file flag - 1 day.
+- **Configurable grading scale** stored in a `grade_scheme` table so
+  the department can adjust letter->point mappings per batch - 2 days.
+- **Admin User Management UI** for creating / disabling users and
+  resetting passwords - 2 days.
+- **Field-level audit diffs** (before/after values) with a richer
+  `audit_log` schema - 2 days.
+- **PDF grade sheet export** via Apache PDFBox in addition to direct
+  printing - 2 days.
+- **Report export to CSV/Excel** for Finance and Inventory - 1 day.
+
+#### Phase 4 - Scale-out & Extension (3-4 weeks)
+
+Optional, out of course scope but listed per SRS Section 3.6
+("Scalability") guidance.
+
+- **Multi-department support**: add a `department_id` discriminator
+  to all core tables and a department-scoped login - 1 week.
+- **Migration to Spring Boot + JPA/Hibernate** while keeping the
+  current Swing client - 1 week.
+- **Web front-end** (React or Thymeleaf) served by the same Spring
+  backend, satisfying the SRS Section 2.1 "web-based deployment"
+  alternative - 2 weeks.
+- **Role-based dashboards** (HOD sees financial KPIs, Faculty sees
+  taught-course grade distributions) - 3 days.
+- **Email notifications** for grade publication and registration
+  confirmation via JavaMail - 2 days.
+
+### Summary timeline
+
+| Phase                           | Status      | Effort       |
+|---------------------------------|-------------|--------------|
+| 0. Requirements & Planning      | Done        | 1 week       |
+| 1. MVP Implementation           | Done        | 2 weeks      |
+| 2. Hardening & UX Polish        | Upcoming    | 1.5 weeks    |
+| 3. SRS Compliance Uplift        | Upcoming    | 2 weeks      |
+| 4. Scale-out & Extension        | Stretch     | 3-4 weeks    |
+
 ## Project Layout
 
 ```
