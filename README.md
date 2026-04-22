@@ -1,233 +1,417 @@
 # UDIS - University Department Information System
 
-A minimal Java Swing desktop application implementing the UDIS SRS for the
-Software Engineering course at IIIT Ranchi. Covers all twelve features
-(F-01 to F-12): student profiles, course catalogue, semester registration,
-grading with automatic GPA/CGPA, inventory, cash book, research /
-publications, student-info query, RBAC, and audit logging.
+A desktop application that centralizes the administrative operations of a
+university department: student records, course catalogue, semester
+registration, grading, inventory, finance, and research tracking. Built to
+the specification laid out in *SRS v1.0* (University Department Information
+System).
+
+UDIS replaces ad-hoc spreadsheets and paper registers with a single,
+auditable, role-based system that keeps academic, financial, and asset
+records consistent in real time.
+
+## Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Domain Model](#domain-model)
+- [Data Flow](#data-flow)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Configuration](#configuration)
+- [Default Accounts](#default-accounts)
+- [Project Structure](#project-structure)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Authors](#authors)
+
+## Overview
+
+UDIS is a Java Swing desktop client backed by a MySQL relational store.
+It is scoped to a single department (multi-department support is on the
+roadmap) and designed around four user classes with distinct permissions:
+**Secretary**, **Head of Department (HOD)**, **Faculty**, and **System
+Administrator**.
+
+The application targets office-class hardware and is intentionally
+lightweight: no external application server, no container runtime, and no
+network services beyond the JDBC connection to MySQL.
+
+## Features
+
+| ID    | Feature                                         | Module |
+|-------|-------------------------------------------------|--------|
+| F-01  | Student profile management with duplicate-roll-number detection | `StudentPanel` |
+| F-02  | Course catalogue with prerequisite relationships                | `CoursePanel`  |
+| F-03  | Semester registration with automatic prerequisite validation    | `RegistrationPanel` + `RegistrationService` |
+| F-04  | Grade entry with automatic GPA and CGPA computation             | `GradePanel` + `GpaService` |
+| F-05  | Printable, formatted grade sheets                               | `GradePanel` via `JEditorPane.print()` |
+| F-06  | Inventory register with search, filtering, and disposal marking | `InventoryPanel` |
+| F-07  | Cash-book transaction management with live running balance      | `FinancePanel` + `CashBookService` |
+| F-08  | Financial reporting with date-range filters                     | `FinancePanel` summary dialog |
+| F-09  | Research project and publication tracking                       | `ResearchPanel` |
+| F-10  | Consolidated student information query                          | `QueryPanel` |
+| F-11  | Role-based access control                                       | `AuthService` |
+| F-12  | Audit logging of logins and data mutations                      | `AuditService` + `AuditPanel` |
+
+## Architecture
+
+UDIS follows a classic three-layer architecture (presentation - service -
+persistence) within a single desktop process.
+
+```mermaid
+flowchart TB
+    subgraph Presentation
+        LoginFrame
+        MainFrame
+        subgraph Panels
+            StudentPanel
+            CoursePanel
+            RegistrationPanel
+            GradePanel
+            InventoryPanel
+            FinancePanel
+            ResearchPanel
+            QueryPanel
+            AuditPanel
+        end
+    end
+
+    subgraph Services
+        AuthService
+        RegistrationService
+        GpaService
+        CashBookService
+        AuditService
+    end
+
+    subgraph Persistence
+        DAOs["DAO Layer<br/>StudentDao, CourseDao, ...<br/>plain JDBC"]
+        Database["Database<br/>connection singleton<br/>+ schema/seed loader"]
+    end
+
+    MySQL[("MySQL 8")]
+
+    LoginFrame --> AuthService
+    MainFrame --> Panels
+    Panels --> Services
+    Panels --> DAOs
+    Services --> DAOs
+    DAOs --> Database
+    Database --> MySQL
+    Services --> AuditService
+    AuditService --> DAOs
+```
+
+Key design choices:
+
+- **Separation of concerns.** Each Swing panel owns only UI concerns and
+  delegates all business rules to services or DAOs.
+- **Stateless services.** Services hold no per-user state; the currently
+  authenticated principal is kept in `AuthService.currentUser()` and read
+  on demand.
+- **Single JDBC connection.** A `Database` singleton owns one
+  `java.sql.Connection`. This is sufficient for a single-user desktop
+  workload; connection pooling is planned for multi-client deployments.
+- **Schema bootstrapping.** Schema and seed scripts are loaded from the
+  classpath at first launch, so the application is installable with zero
+  manual database preparation.
+
+## Domain Model
+
+```mermaid
+erDiagram
+    STUDENT ||--o{ REGISTRATION : "enrolls in"
+    COURSE ||--o{ REGISTRATION : "is offered as"
+    COURSE ||--o| COURSE : "requires"
+    STUDENT ||--o{ GRADE : "receives"
+    COURSE ||--o{ GRADE : "graded in"
+    APP_USER }|..|{ AUDIT_LOG : "attributed to"
+    INVENTORY_ITEM }o--|| DEPARTMENT : "belongs to"
+    TXN }o--|| DEPARTMENT : "records"
+    RESEARCH_PROJECT }o--|| DEPARTMENT : "run by"
+    PUBLICATION }o--|| DEPARTMENT : "authored in"
+
+    STUDENT {
+        string roll_no PK
+        string name
+        date   dob
+        string program
+        string batch
+    }
+    COURSE {
+        string course_id PK
+        string course_name
+        int    credits
+        int    semester
+        string prerequisite_id FK
+    }
+    REGISTRATION {
+        int    reg_id PK
+        string roll_no FK
+        string course_id FK
+        int    semester
+        int    year
+        string status
+    }
+    GRADE {
+        int     grade_id PK
+        string  roll_no FK
+        string  course_id FK
+        int     semester
+        int     year
+        string  letter_grade
+        decimal grade_points
+    }
+```
+
+The *DEPARTMENT* relationships are logical in the current release (the
+system is scoped to a single department) and become physical FK columns
+in Phase 4.
+
+## Data Flow
+
+The following sequence illustrates the most representative end-to-end
+flow - semester registration with prerequisite validation.
+
+```mermaid
+sequenceDiagram
+    participant User as Secretary
+    participant UI as RegistrationPanel
+    participant Svc as RegistrationService
+    participant CDao as CourseDao
+    participant RDao as RegistrationDao
+    participant Audit as AuditService
+    participant DB as MySQL
+
+    User->>UI: Enter roll no, load profile
+    UI->>RDao: findByStudent(rollNo)
+    RDao->>DB: SELECT completed / backlogged regs
+    DB-->>RDao: rows
+    RDao-->>UI: List<Registration>
+    UI-->>User: Display profile + completed + backlog
+
+    User->>UI: Select courses, click Confirm
+    loop for each selected course
+        UI->>Svc: register(rollNo, courseId, sem, year)
+        Svc->>CDao: findById(courseId)
+        CDao->>DB: SELECT course
+        DB-->>CDao: Course row
+        CDao-->>Svc: Course
+        Svc->>RDao: hasCompleted(rollNo, prereqId)
+        RDao->>DB: SELECT status='COMPLETED'
+        DB-->>RDao: match or empty
+        RDao-->>Svc: boolean
+        alt prerequisite cleared
+            Svc->>RDao: insert(Registration)
+            RDao->>DB: INSERT registration
+            Svc->>Audit: log(REGISTER, ...)
+            Audit->>DB: INSERT audit_log
+            Svc-->>UI: success
+        else prerequisite missing
+            Svc-->>UI: RegistrationException
+        end
+    end
+    UI-->>User: Per-course success / failure summary
+```
+
+Grade entry follows the same pattern: the UI collects inputs,
+`GpaService` is invoked to derive grade points and updated semester GPA,
+`GradeDao.upsert(...)` persists the grade, the corresponding
+`Registration.status` is flipped to `COMPLETED` or `BACKLOG`, and an
+audit entry is written.
 
 ## Tech Stack
 
-- Java 17, Swing (FlatLaf look-and-feel)
-- Maven
-- MySQL 8 with plain JDBC
-- `jbcrypt` for password hashing
+| Concern              | Choice                                      |
+|----------------------|---------------------------------------------|
+| Language             | Java 17                                     |
+| UI                   | Swing with FlatLaf 3.4 look-and-feel        |
+| Persistence          | MySQL 8, plain JDBC via `mysql-connector-j` |
+| Password hashing     | `jBCrypt` 0.4                               |
+| Build                | Apache Maven 3.8+                           |
+| Packaging            | `maven-shade-plugin` (runnable fat JAR)     |
+| Backup utility       | `mysqldump` (shelled out from the app)      |
 
-## Prerequisites
+## Getting Started
 
-1. JDK 17+
-2. Maven 3.8+
-3. A running MySQL 8 instance on `localhost:3306`
-4. `mysqldump` on `PATH` (only for the optional "Backup Database" menu item)
+### Prerequisites
 
-## Setup
+- JDK 17 or newer (`java -version`)
+- Apache Maven 3.8 or newer (`mvn -version`)
+- A running MySQL 8 server reachable on `localhost:3306`
+- `mysqldump` on the `PATH` (only required for the in-app backup action)
 
-1. Ensure MySQL is running. The app uses `createDatabaseIfNotExist=true`, so
-   the `udis` database is created automatically on first launch.
+### Build
 
-2. Edit `src/main/resources/config.properties` to match your MySQL credentials:
+```bash
+mvn clean package
+```
 
-   ```
-   jdbc.url=jdbc:mysql://localhost:3306/udis?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
-   jdbc.user=root
-   jdbc.password=root
-   maintenance=false
-   ```
+This produces a self-contained runnable archive at `target/udis.jar`.
 
-3. Build and run:
+### Run
 
-   ```bash
-   mvn clean package
-   java -jar target/udis.jar
-   ```
+```bash
+java -jar target/udis.jar
+```
 
-   Or directly with Maven:
+Alternatively, during development:
 
-   ```bash
-   mvn compile exec:java -Dexec.mainClass=com.udis.Main
-   ```
+```bash
+mvn compile exec:java -Dexec.mainClass=com.udis.Main
+```
 
-On first run, schema and demo data are loaded automatically.
+On first launch, UDIS:
 
-## Demo Credentials
+1. Connects to MySQL, creating the `udis` database if it does not exist.
+2. Executes `schema.sql` to create all tables with the necessary
+   primary- and foreign-key constraints.
+3. If `app_user` is empty, loads `seed.sql` (reference data) and
+   inserts the default user accounts with BCrypt-hashed passwords.
 
-| Role      | Username    | Password       | Capability                                         |
-|-----------|-------------|----------------|----------------------------------------------------|
-| Secretary | `secretary` | `secretary123` | Full write access to all academic + admin modules  |
-| HOD       | `hod`       | `hod123`       | Read-only on everything; reports & queries         |
-| Faculty   | `faculty`   | `faculty123`   | Read-only on students, courses, grades             |
-| Admin     | `admin`     | `admin123`     | Access to the Audit Log module                     |
+## Configuration
 
-## Suggested Demo Flow (5 minutes)
+Runtime configuration lives in `src/main/resources/config.properties`:
 
-1. Log in as `secretary`.
-2. **Students** tab - add a new student (e.g. roll `2023UG1099`).
-3. **Courses** tab - note the CS101 -> CS102 prerequisite chain in the seed data.
-4. **Registration** tab - roll `2023UG1063`, Sem 3 / Year 2024, click
-   *Load Profile*. Completed (CS101) and back-log (CS102) are shown. Try
-   registering for `CS201` - it will be rejected because CS102 hasn't been
-   cleared.
-5. **Grades** tab - roll `2023UG1049`, Sem 3 / Year 2024; enter letter grades,
-   *Save Grades*, then *Print Grade Sheet* for the HTML transcript.
-6. **Finance** tab - running balance is shown at the top. Click
-   *Financial Summary...* for date-range totals.
-7. **Inventory** tab - use the search box to filter and try *Mark Disposed*.
-8. **Student Query** tab - roll `2023UG1049` to see the read-only 360 view.
-9. Log out, sign in as `admin` -> **Audit Log** tab shows the activity we
-   just generated.
+```properties
+jdbc.url=jdbc:mysql://localhost:3306/udis?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+jdbc.user=root
+jdbc.password=root
+maintenance=false
+```
 
-## Module / SRS Feature Mapping
+| Key             | Description                                                        |
+|-----------------|--------------------------------------------------------------------|
+| `jdbc.url`      | JDBC URL to the MySQL instance                                     |
+| `jdbc.user`     | Database user. Must have rights to create tables on first launch.  |
+| `jdbc.password` | Database password                                                  |
+| `maintenance`   | When `true`, only users with the `ADMIN` role may sign in          |
 
-| SRS Feature                          | Implementation                                  |
-|--------------------------------------|-------------------------------------------------|
-| F-01 Student Profile Management      | `StudentPanel` + `StudentDao`                   |
-| F-02 Course Catalogue                | `CoursePanel` + `CourseDao`                     |
-| F-03 Semester Registration           | `RegistrationPanel` + `RegistrationService`     |
-| F-04 Grade Entry & GPA/CGPA          | `GradePanel` + `GpaService`                     |
-| F-05 Grade Sheet Printing            | `JEditorPane.print()` in `GradePanel`           |
-| F-06 Inventory Register              | `InventoryPanel` + `InventoryDao`               |
-| F-07 Cash Book Management            | `FinancePanel` + `CashBookService`              |
-| F-08 Financial Reporting             | "Financial Summary..." dialog in `FinancePanel` |
-| F-09 Research & Publications         | `ResearchPanel` with two sub-tabs               |
-| F-10 Student Info Query              | `QueryPanel` - read-only 360 view               |
-| F-11 Role-Based Access Control       | `AuthService.canWrite / canAccess`              |
-| F-12 Audit Logging                   | `AuditService` + `AuditPanel` (admin only)      |
+## Default Accounts
 
-## MVP Simplifications (vs. full SRS)
+The bootstrap seed creates one account per role. Passwords are stored as
+BCrypt hashes; the values below are only the initial plaintexts and
+should be rotated before any multi-user deployment.
 
-- Plain JDBC, no ORM.
-- `Database.java` single-connection singleton instead of a pool.
-- Automated 24h backup replaced with a manual *File > Backup Database...*
-  menu item that invokes `mysqldump`.
-- Maintenance Mode is the `maintenance=true` flag in `config.properties`;
-  when set, only the Admin role may log in.
-- Letter-grade scale is fixed in `GpaService` (A=10, A-=9, B+=8.5, ..., F=0)
-  rather than configurable per semester.
-- Audit log records logins and insert/update/delete events only (no
-  field-level diffs).
+| Role      | Username    | Initial Password | Permissions                                           |
+|-----------|-------------|------------------|-------------------------------------------------------|
+| Secretary | `secretary` | `secretary123`   | Full read/write across all operational modules        |
+| HOD       | `hod`       | `hod123`         | Read access across all modules; reports and queries   |
+| Faculty   | `faculty`   | `faculty123`     | Read access to students, courses, and grade records   |
+| Admin     | `admin`     | `admin123`       | Access to the audit log and system-level operations   |
 
-## Project Phases and Roadmap
-
-Total effort is measured in calendar weeks for a 4-member team working on
-the course timeline. Effort estimates are indicative.
-
-### Completed phases
-
-#### Phase 0 - Requirements & Planning (1 week) - DONE
-
-- SRS v1.0 authored and approved.
-- Tech-stack decisions (Java 17 + Swing + MySQL + plain JDBC + Maven).
-- Schema design (10 tables, SRS Section 3.4).
-- MVP scope frozen: all 12 features at a demo-worthy level.
-
-#### Phase 1 - MVP Implementation (2 weeks) - DONE
-
-Current state of the codebase. Deliverables:
-
-- Maven project with fat-jar packaging via `maven-shade-plugin`.
-- MySQL schema + seed data auto-loaded on first launch.
-- Login with BCrypt-hashed credentials and four seeded roles.
-- All twelve SRS features (F-01 to F-12) implemented as independent
-  Swing panels behind a single `JTabbedPane`.
-- GPA / CGPA computation, prerequisite checking, running cash balance,
-  printable HTML grade sheet, searchable inventory, finance date-range
-  summary, audit trail.
-- FlatLaf look-and-feel, role-gated UI, manual DB backup via
-  `mysqldump`, README with demo script.
-
-### Upcoming phases
-
-#### Phase 2 - Hardening & UX Polish (1.5 weeks)
-
-Goal: raise the MVP to "production-ish" quality for the final viva.
-
-- **Date pickers** (JCalendar or equivalent) instead of free-text
-  `YYYY-MM-DD` fields - 1 day.
-- **Stricter input validation** across all forms with inline error
-  hints rather than modal dialogs - 2 days.
-- **Connection pooling** with HikariCP, replacing the singleton
-  `Connection` in `Database.java` - 1 day.
-- **Transactional grade entry**: wrap the multi-row "Save Grades"
-  operation in a single JDBC transaction so partial failures roll back
-  - 1 day.
-- **Unit tests** for `GpaService`, `RegistrationService`, and
-  `CashBookService` using JUnit 5 - 2 days.
-- **Keyboard shortcuts** on main actions (Ctrl-S save, Ctrl-F search,
-  Esc to clear form) - 0.5 day.
-- **App icon & splash screen** - 0.5 day.
-
-#### Phase 3 - SRS Compliance Uplift (2 weeks)
-
-Close the remaining gaps between the MVP shortcuts and the letter of
-the SRS.
-
-- **Automated 24h backup scheduler** using
-  `ScheduledExecutorService` instead of the manual menu item - 1 day.
-- **Proper Maintenance Mode** toggled at runtime by Admin (with a
-  system-wide banner) rather than a config file flag - 1 day.
-- **Configurable grading scale** stored in a `grade_scheme` table so
-  the department can adjust letter->point mappings per batch - 2 days.
-- **Admin User Management UI** for creating / disabling users and
-  resetting passwords - 2 days.
-- **Field-level audit diffs** (before/after values) with a richer
-  `audit_log` schema - 2 days.
-- **PDF grade sheet export** via Apache PDFBox in addition to direct
-  printing - 2 days.
-- **Report export to CSV/Excel** for Finance and Inventory - 1 day.
-
-#### Phase 4 - Scale-out & Extension (3-4 weeks)
-
-Optional, out of course scope but listed per SRS Section 3.6
-("Scalability") guidance.
-
-- **Multi-department support**: add a `department_id` discriminator
-  to all core tables and a department-scoped login - 1 week.
-- **Migration to Spring Boot + JPA/Hibernate** while keeping the
-  current Swing client - 1 week.
-- **Web front-end** (React or Thymeleaf) served by the same Spring
-  backend, satisfying the SRS Section 2.1 "web-based deployment"
-  alternative - 2 weeks.
-- **Role-based dashboards** (HOD sees financial KPIs, Faculty sees
-  taught-course grade distributions) - 3 days.
-- **Email notifications** for grade publication and registration
-  confirmation via JavaMail - 2 days.
-
-### Summary timeline
-
-| Phase                           | Status      | Effort       |
-|---------------------------------|-------------|--------------|
-| 0. Requirements & Planning      | Done        | 1 week       |
-| 1. MVP Implementation           | Done        | 2 weeks      |
-| 2. Hardening & UX Polish        | Upcoming    | 1.5 weeks    |
-| 3. SRS Compliance Uplift        | Upcoming    | 2 weeks      |
-| 4. Scale-out & Extension        | Stretch     | 3-4 weeks    |
-
-## Project Layout
+## Project Structure
 
 ```
 udis/
-|-- pom.xml
-|-- README.md
-`-- src/main/
-    |-- java/com/udis/
-    |   |-- Main.java
-    |   |-- db/Database.java
-    |   |-- model/   (9 POJOs)
-    |   |-- dao/     (9 DAOs)
-    |   |-- service/ (AuthService, GpaService, RegistrationService,
-    |   |             CashBookService, AuditService)
-    |   `-- ui/      (LoginFrame, MainFrame + 9 module panels, UiUtils)
-    `-- resources/
-        |-- schema.sql
-        |-- seed.sql
-        `-- config.properties
+├── pom.xml
+├── README.md
+└── src/main/
+    ├── java/com/udis/
+    │   ├── Main.java
+    │   ├── db/            Database bootstrap and connection management
+    │   ├── model/         Plain Java domain objects (9 entities)
+    │   ├── dao/           JDBC DAOs, one per aggregate
+    │   ├── service/       Business rules: auth, registration, GPA, cash-book, audit
+    │   └── ui/            Swing frames and panels (one per SRS feature)
+    └── resources/
+        ├── schema.sql     DDL for all tables and constraints
+        ├── seed.sql       Reference and sample data
+        └── config.properties
 ```
 
-## Team
+## Roadmap
 
-- Aditya Sharma (2023UG1063)
-- Aishwary Dixit (2023UG1049)
-- Vijit Vishnoi (2023UG1064)
-- Abhinav Kumar Srivastava (2023UG1070)
+Effort is expressed in calendar weeks for a four-person engineering
+team. Estimates are indicative and should be revisited during each
+phase's kickoff.
 
-Instructor: Dr. Jayadeep Pati, IIIT Ranchi.
+### Phase 0 - Requirements and Planning (1 week) - completed
+
+- SRS v1.0 authored, reviewed, and baselined.
+- Technology selection and architectural decisions.
+- Database schema design (10 entities, SRS §3.4).
+- MVP scope freeze covering all 12 features at a baseline level.
+
+### Phase 1 - MVP Implementation (2 weeks) - completed
+
+- Maven project scaffold with fat-jar packaging.
+- MySQL schema and seed data auto-loaded on first launch.
+- Authentication with BCrypt-hashed credentials and four seeded roles.
+- All twelve SRS features (F-01 to F-12) delivered as independent Swing
+  panels behind a single `JTabbedPane`.
+- Core computations: GPA, CGPA, prerequisite validation, running
+  cash-book balance, printable grade sheet.
+- Role-gated UI, manual database backup via `mysqldump`, audit trail
+  for logins and mutations.
+
+### Phase 2 - Hardening and UX (1.5 weeks)
+
+Goal: production-grade robustness and operator ergonomics.
+
+| Work Item                                                              | Effort |
+|------------------------------------------------------------------------|--------|
+| Replace free-text date inputs with a date-picker component             | 1 day  |
+| Inline, per-field input validation across all forms                    | 2 days |
+| HikariCP connection pool replacing the singleton `Connection`          | 1 day  |
+| Transactional "Save Grades" operation (atomic multi-row commit)        | 1 day  |
+| JUnit 5 test suite for `GpaService`, `RegistrationService`, `CashBookService` | 2 days |
+| Keyboard accelerators (Save, Search, Clear, etc.)                      | 0.5 day |
+| Application icon and splash screen                                     | 0.5 day |
+
+### Phase 3 - SRS Compliance Uplift (2 weeks)
+
+Close the deliberate MVP shortcuts against the letter of the SRS.
+
+| Work Item                                                              | Effort |
+|------------------------------------------------------------------------|--------|
+| Automated daily backups via `ScheduledExecutorService`                 | 1 day  |
+| Runtime-toggled Maintenance Mode with system-wide banner               | 1 day  |
+| Configurable grading scheme stored in a `grade_scheme` table           | 2 days |
+| Administrator UI for user creation, deactivation, password reset       | 2 days |
+| Field-level audit diffs (before/after values) with enriched schema     | 2 days |
+| PDF grade-sheet export via Apache PDFBox                               | 2 days |
+| CSV/Excel export for finance and inventory reports                     | 1 day  |
+
+### Phase 4 - Scale-out and Extension (3-4 weeks)
+
+Optional work to extend the system beyond its initial single-department
+scope, as anticipated by SRS §3.6 (Scalability).
+
+| Work Item                                                              | Effort |
+|------------------------------------------------------------------------|--------|
+| Multi-department support with a `department_id` discriminator          | 1 week |
+| Migration to Spring Boot and JPA/Hibernate (backend)                   | 1 week |
+| Web front-end (React or Thymeleaf) served by the Spring backend        | 2 weeks |
+| Role-specific dashboards with aggregate KPIs                           | 3 days |
+| Email notifications for grade publication and registration confirmation | 2 days |
+
+### Timeline Summary
+
+| Phase                                 | Status    | Effort       |
+|---------------------------------------|-----------|--------------|
+| 0. Requirements and Planning          | Completed | 1 week       |
+| 1. MVP Implementation                 | Completed | 2 weeks      |
+| 2. Hardening and UX                   | Planned   | 1.5 weeks    |
+| 3. SRS Compliance Uplift              | Planned   | 2 weeks      |
+| 4. Scale-out and Extension            | Stretch   | 3 - 4 weeks  |
+
+## Contributing
+
+1. Create a feature branch from `main`: `git checkout -b feature/<topic>`.
+2. Keep changes scoped to one module where possible; the codebase is
+   deliberately modular so that each SRS feature can evolve
+   independently.
+3. Write or update unit tests for any change to `com.udis.service.*`.
+4. Ensure `mvn clean package` succeeds before opening a pull request.
+5. Follow the existing code style: 4-space indentation, no wildcard
+   imports, constructor-based wiring for services.
+
+## Authors
+
+- Aditya Sharma
+- Aishwary Dixit
+- Vijit Vishnoi
+- Abhinav Kumar Srivastava
